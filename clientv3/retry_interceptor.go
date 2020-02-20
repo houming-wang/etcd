@@ -28,6 +28,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // unaryClientInterceptor returns a new retrying unary client interceptor.
@@ -79,7 +80,7 @@ func (c *Client) unaryClientInterceptor(logger *zap.Logger, optFuncs ...retryOpt
 						zap.String("target", cc.Target()),
 						zap.Error(gterr),
 					)
-					return lastErr // return the original error for simplicity
+					return gterr // lastErr must be invalid auth token
 				}
 				continue
 			}
@@ -109,13 +110,12 @@ func (c *Client) streamClientInterceptor(logger *zap.Logger, optFuncs ...retryOp
 			return streamer(ctx, desc, cc, method, grpcOpts...)
 		}
 		if desc.ClientStreams {
-			return nil, grpc.Errorf(codes.Unimplemented, "clientv3/retry_interceptor: cannot retry on ClientStreams, set Disable()")
+			return nil, status.Errorf(codes.Unimplemented, "clientv3/retry_interceptor: cannot retry on ClientStreams, set Disable()")
 		}
 		newStreamer, err := streamer(ctx, desc, cc, method, grpcOpts...)
-		logger.Warn("retry stream intercept", zap.Error(err))
 		if err != nil {
-			// TODO(mwitkow): Maybe dial and transport errors should be retriable?
-			return nil, err
+			logger.Error("streamer failed to create ClientStream", zap.Error(err))
+			return nil, err // TODO(mwitkow): Maybe dial and transport errors should be retriable?
 		}
 		retryingStreamer := &serverStreamingRetryingStream{
 			client:       c,
@@ -184,6 +184,7 @@ func (s *serverStreamingRetryingStream) RecvMsg(m interface{}) error {
 	if !attemptRetry {
 		return lastErr // success or hard failure
 	}
+
 	// We start off from attempt 1, because zeroth was already made on normal SendMsg().
 	for attempt := uint(1); attempt < s.callOpts.max; attempt++ {
 		if err := waitRetryBackoff(s.ctx, attempt, s.callOpts); err != nil {
@@ -191,12 +192,13 @@ func (s *serverStreamingRetryingStream) RecvMsg(m interface{}) error {
 		}
 		newStream, err := s.reestablishStreamAndResendBuffer(s.ctx)
 		if err != nil {
-			// TODO(mwitkow): Maybe dial and transport errors should be retriable?
-			return err
+			s.client.lg.Error("failed reestablishStreamAndResendBuffer", zap.Error(err))
+			return err // TODO(mwitkow): Maybe dial and transport errors should be retriable?
 		}
 		s.setStream(newStream)
+
+		s.client.lg.Warn("retrying RecvMsg", zap.Error(lastErr))
 		attemptRetry, lastErr = s.receiveMsgAndIndicateRetry(m)
-		//fmt.Printf("Received message and indicate: %v  %v\n", attemptRetry, lastErr)
 		if !attemptRetry {
 			return lastErr
 		}
@@ -296,11 +298,11 @@ func isContextError(err error) bool {
 func contextErrToGrpcErr(err error) error {
 	switch err {
 	case context.DeadlineExceeded:
-		return grpc.Errorf(codes.DeadlineExceeded, err.Error())
+		return status.Errorf(codes.DeadlineExceeded, err.Error())
 	case context.Canceled:
-		return grpc.Errorf(codes.Canceled, err.Error())
+		return status.Errorf(codes.Canceled, err.Error())
 	default:
-		return grpc.Errorf(codes.Unknown, err.Error())
+		return status.Errorf(codes.Unknown, err.Error())
 	}
 }
 
@@ -325,13 +327,6 @@ type backoffFunc func(attempt uint) time.Duration
 func withRetryPolicy(rp retryPolicy) retryOption {
 	return retryOption{applyFunc: func(o *options) {
 		o.retryPolicy = rp
-	}}
-}
-
-// withAuthRetry sets enables authentication retries.
-func withAuthRetry(retryAuth bool) retryOption {
-	return retryOption{applyFunc: func(o *options) {
-		o.retryAuth = retryAuth
 	}}
 }
 

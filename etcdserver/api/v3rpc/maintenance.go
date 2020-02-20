@@ -55,6 +55,10 @@ type AuthGetter interface {
 	AuthStore() auth.AuthStore
 }
 
+type ClusterStatusGetter interface {
+	IsLearner() bool
+}
+
 type maintenanceServer struct {
 	lg  *zap.Logger
 	rg  etcdserver.RaftStatusGetter
@@ -63,33 +67,25 @@ type maintenanceServer struct {
 	a   Alarmer
 	lt  LeaderTransferrer
 	hdr header
+	cs  ClusterStatusGetter
 }
 
 func NewMaintenanceServer(s *etcdserver.EtcdServer) pb.MaintenanceServer {
-	srv := &maintenanceServer{lg: s.Cfg.Logger, rg: s, kg: s, bg: s, a: s, lt: s, hdr: newHeader(s)}
+	srv := &maintenanceServer{lg: s.Cfg.Logger, rg: s, kg: s, bg: s, a: s, lt: s, hdr: newHeader(s), cs: s}
+	if srv.lg == nil {
+		srv.lg = zap.NewNop()
+	}
 	return &authMaintenanceServer{srv, s}
 }
 
 func (ms *maintenanceServer) Defragment(ctx context.Context, sr *pb.DefragmentRequest) (*pb.DefragmentResponse, error) {
-	if ms.lg != nil {
-		ms.lg.Info("starting defragment")
-	} else {
-		plog.Noticef("starting to defragment the storage backend...")
-	}
+	ms.lg.Info("starting defragment")
 	err := ms.bg.Backend().Defrag()
 	if err != nil {
-		if ms.lg != nil {
-			ms.lg.Warn("failed to defragment", zap.Error(err))
-		} else {
-			plog.Errorf("failed to defragment the storage backend (%v)", err)
-		}
+		ms.lg.Warn("failed to defragment", zap.Error(err))
 		return nil, err
 	}
-	if ms.lg != nil {
-		ms.lg.Info("finished defragment")
-	} else {
-		plog.Noticef("finished defragmenting the storage backend")
-	}
+	ms.lg.Info("finished defragment")
 	return &pb.DefragmentResponse{}, nil
 }
 
@@ -102,11 +98,7 @@ func (ms *maintenanceServer) Snapshot(sr *pb.SnapshotRequest, srv pb.Maintenance
 	go func() {
 		snap.WriteTo(pw)
 		if err := snap.Close(); err != nil {
-			if ms.lg != nil {
-				ms.lg.Warn("failed to close snapshot", zap.Error(err))
-			} else {
-				plog.Errorf("error closing snapshot (%v)", err)
-			}
+			ms.lg.Warn("failed to close snapshot", zap.Error(err))
 		}
 		pw.Close()
 	}()
@@ -164,7 +156,15 @@ func (ms *maintenanceServer) HashKV(ctx context.Context, r *pb.HashKVRequest) (*
 }
 
 func (ms *maintenanceServer) Alarm(ctx context.Context, ar *pb.AlarmRequest) (*pb.AlarmResponse, error) {
-	return ms.a.Alarm(ctx, ar)
+	resp, err := ms.a.Alarm(ctx, ar)
+	if err != nil {
+		return nil, togRPCError(err)
+	}
+	if resp.Header == nil {
+		resp.Header = &pb.ResponseHeader{}
+	}
+	ms.hdr.fill(resp.Header)
+	return resp, nil
 }
 
 func (ms *maintenanceServer) Status(ctx context.Context, ar *pb.StatusRequest) (*pb.StatusResponse, error) {
@@ -179,6 +179,7 @@ func (ms *maintenanceServer) Status(ctx context.Context, ar *pb.StatusRequest) (
 		RaftTerm:         ms.rg.Term(),
 		DbSize:           ms.bg.Backend().Size(),
 		DbSizeInUse:      ms.bg.Backend().SizeInUse(),
+		IsLearner:        ms.cs.IsLearner(),
 	}
 	if resp.Leader == raft.None {
 		resp.Errors = append(resp.Errors, etcdserver.ErrNoLeader.Error())

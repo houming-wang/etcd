@@ -19,7 +19,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/coreos/go-systemd/daemon"
+	"github.com/coreos/go-systemd/v22/daemon"
 	"go.uber.org/zap"
 )
 
@@ -51,8 +51,6 @@ func notifySystemd(lg *zap.Logger) {
 	if err != nil {
 		if lg != nil {
 			lg.Error("failed to notify systemd for readiness", zap.Error(err))
-		} else {
-			plog.Errorf("failed to notify systemd for readiness: %v", err)
 		}
 	}
 }

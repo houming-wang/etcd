@@ -114,7 +114,7 @@ func setupAuthStore(t *testing.T) (store *authStore, teardownfunc func(t *testin
 		t.Fatal(err)
 	}
 
-	ua := &pb.AuthUserAddRequest{Name: "foo", Password: "bar"}
+	ua := &pb.AuthUserAddRequest{Name: "foo", Password: "bar", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err = as.UserAdd(ua) // add a non-existing user
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func setupAuthStore(t *testing.T) (store *authStore, teardownfunc func(t *testin
 }
 
 func enableAuthAndCreateRoot(as *authStore) error {
-	_, err := as.UserAdd(&pb.AuthUserAddRequest{Name: "root", Password: "root"})
+	_, err := as.UserAdd(&pb.AuthUserAddRequest{Name: "root", Password: "root", Options: &authpb.UserAddOptions{NoPassword: false}})
 	if err != nil {
 		return err
 	}
@@ -151,7 +151,7 @@ func TestUserAdd(t *testing.T) {
 	as, tearDown := setupAuthStore(t)
 	defer tearDown(t)
 
-	ua := &pb.AuthUserAddRequest{Name: "foo"}
+	ua := &pb.AuthUserAddRequest{Name: "foo", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err := as.UserAdd(ua) // add an existing user
 	if err == nil {
 		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
@@ -160,7 +160,7 @@ func TestUserAdd(t *testing.T) {
 		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
 	}
 
-	ua = &pb.AuthUserAddRequest{Name: ""}
+	ua = &pb.AuthUserAddRequest{Name: "", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err = as.UserAdd(ua) // add a user with empty name
 	if err != ErrUserEmpty {
 		t.Fatal(err)
@@ -267,6 +267,12 @@ func TestRoleAdd(t *testing.T) {
 	// adds a new role
 	_, err := as.RoleAdd(&pb.AuthRoleAddRequest{Name: "role-test-1"})
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	// add a role with empty name
+	_, err = as.RoleAdd(&pb.AuthRoleAddRequest{Name: ""})
+	if err != ErrRoleEmpty {
 		t.Fatal(err)
 	}
 }
@@ -390,7 +396,7 @@ func TestListUsers(t *testing.T) {
 	as, tearDown := setupAuthStore(t)
 	defer tearDown(t)
 
-	ua := &pb.AuthUserAddRequest{Name: "user1", Password: "pwd1"}
+	ua := &pb.AuthUserAddRequest{Name: "user1", Password: "pwd1", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err := as.UserAdd(ua) // add a non-existing user
 	if err != nil {
 		t.Fatal(err)
@@ -615,6 +621,30 @@ func TestAuthDisable(t *testing.T) {
 	}
 }
 
+func TestIsAuthEnabled(t *testing.T) {
+	as, tearDown := setupAuthStore(t)
+	defer tearDown(t)
+
+	// enable authentication to test the first possible condition
+	as.AuthEnable()
+
+	status := as.IsAuthEnabled()
+	ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(2)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	_, _ = as.Authenticate(ctx, "foo", "bar")
+	if status != true {
+		t.Errorf("expected %v, got %v", true, false)
+	}
+
+	// Disabling disabled auth to test the other condition that can be return
+	as.AuthDisable()
+
+	status = as.IsAuthEnabled()
+	_, _ = as.Authenticate(ctx, "foo", "bar")
+	if status != false {
+		t.Errorf("expected %v, got %v", false, true)
+	}
+}
+
 // TestAuthRevisionRace ensures that access to authStore.revision is thread-safe.
 func TestAuthInfoFromCtxRace(t *testing.T) {
 	b, tPath := backend.NewDefaultTmpBackend()
@@ -633,7 +663,7 @@ func TestAuthInfoFromCtxRace(t *testing.T) {
 		ctx := metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{rpctypes.TokenFieldNameGRPC: "test"}))
 		as.AuthInfoFromCtx(ctx)
 	}()
-	as.UserAdd(&pb.AuthUserAddRequest{Name: "test"})
+	as.UserAdd(&pb.AuthUserAddRequest{Name: "test", Options: &authpb.UserAddOptions{NoPassword: false}})
 	<-donec
 }
 
@@ -669,7 +699,7 @@ func TestIsAdminPermitted(t *testing.T) {
 func TestRecoverFromSnapshot(t *testing.T) {
 	as, _ := setupAuthStore(t)
 
-	ua := &pb.AuthUserAddRequest{Name: "foo"}
+	ua := &pb.AuthUserAddRequest{Name: "foo", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err := as.UserAdd(ua) // add an existing user
 	if err == nil {
 		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
@@ -678,7 +708,7 @@ func TestRecoverFromSnapshot(t *testing.T) {
 		t.Fatalf("expected %v, got %v", ErrUserAlreadyExist, err)
 	}
 
-	ua = &pb.AuthUserAddRequest{Name: ""}
+	ua = &pb.AuthUserAddRequest{Name: "", Options: &authpb.UserAddOptions{NoPassword: false}}
 	_, err = as.UserAdd(ua) // add a user with empty name
 	if err != ErrUserEmpty {
 		t.Fatal(err)
@@ -734,7 +764,7 @@ func TestHammerSimpleAuthenticate(t *testing.T) {
 	// create lots of users
 	for i := 0; i < 50; i++ {
 		u := fmt.Sprintf("user-%d", i)
-		ua := &pb.AuthUserAddRequest{Name: u, Password: "123"}
+		ua := &pb.AuthUserAddRequest{Name: u, Password: "123", Options: &authpb.UserAddOptions{NoPassword: false}}
 		if _, err := as.UserAdd(ua); err != nil {
 			t.Fatal(err)
 		}
@@ -751,10 +781,10 @@ func TestHammerSimpleAuthenticate(t *testing.T) {
 				token := fmt.Sprintf("%s(%d)", user, i)
 				ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, token)
 				if _, err := as.Authenticate(ctx, user, "123"); err != nil {
-					t.Fatal(err)
+					t.Error(err)
 				}
 				if _, err := as.AuthInfoFromCtx(ctx); err != nil {
-					t.Fatal(err)
+					t.Error(err)
 				}
 			}(u)
 		}
@@ -779,7 +809,7 @@ func TestRolesOrder(t *testing.T) {
 	}
 
 	username := "user"
-	_, err = as.UserAdd(&pb.AuthUserAddRequest{Name: username, Password: "pass"})
+	_, err = as.UserAdd(&pb.AuthUserAddRequest{Name: username, Password: "pass", Options: &authpb.UserAddOptions{NoPassword: false}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,5 +876,23 @@ func testAuthInfoFromCtxWithRoot(t *testing.T, opts string) {
 	}
 	if ai.Username != "root" {
 		t.Errorf("expected user name 'root', got %+v", ai)
+	}
+}
+
+func TestUserNoPasswordAdd(t *testing.T) {
+	as, tearDown := setupAuthStore(t)
+	defer tearDown(t)
+
+	username := "usernopass"
+	ua := &pb.AuthUserAddRequest{Name: username, Options: &authpb.UserAddOptions{NoPassword: true}}
+	_, err := as.UserAdd(ua)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.WithValue(context.WithValue(context.TODO(), AuthenticateParamIndex{}, uint64(1)), AuthenticateParamSimpleTokenPrefix{}, "dummy")
+	_, err = as.Authenticate(ctx, username, "")
+	if err != ErrAuthFailed {
+		t.Fatalf("expected %v, got %v", ErrAuthFailed, err)
 	}
 }

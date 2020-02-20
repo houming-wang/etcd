@@ -5,10 +5,6 @@
   "produces": [
     "application/json"
   ],
-  "schemes": [
-    "http",
-    "https"
-  ],
   "swagger": "2.0",
   "info": {
     "title": "etcdserver/etcdserverpb/rpc.proto",
@@ -101,7 +97,7 @@
         "tags": [
           "Auth"
         ],
-        "summary": "RoleAdd adds a new role.",
+        "summary": "RoleAdd adds a new role. Role name cannot be empty.",
         "operationId": "RoleAdd",
         "parameters": [
           {
@@ -258,12 +254,39 @@
         }
       }
     },
+    "/v3/auth/status": {
+      "post": {
+        "tags": [
+          "Auth"
+        ],
+        "summary": "AuthStatus displays authentication status.",
+        "operationId": "AuthStatus",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/etcdserverpbAuthStatusRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/etcdserverpbAuthStatusResponse"
+            }
+          }
+        }
+      }
+    },
     "/v3/auth/user/add": {
       "post": {
         "tags": [
           "Auth"
         ],
-        "summary": "UserAdd adds a new user.",
+        "summary": "UserAdd adds a new user. User name cannot be empty.",
         "operationId": "UserAdd",
         "parameters": [
           {
@@ -496,6 +519,33 @@
             "description": "A successful response.",
             "schema": {
               "$ref": "#/definitions/etcdserverpbMemberListResponse"
+            }
+          }
+        }
+      }
+    },
+    "/v3/cluster/member/promote": {
+      "post": {
+        "tags": [
+          "Cluster"
+        ],
+        "summary": "MemberPromote promotes a member from raft learner (non-voting) to raft voting member.",
+        "operationId": "MemberPromote",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "$ref": "#/definitions/etcdserverpbMemberPromoteRequest"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/etcdserverpbMemberPromoteResponse"
             }
           }
         }
@@ -820,7 +870,16 @@
           "200": {
             "description": "A successful response.(streaming responses)",
             "schema": {
-              "$ref": "#/definitions/etcdserverpbLeaseKeepAliveResponse"
+              "type": "object",
+              "title": "Stream result of etcdserverpbLeaseKeepAliveResponse",
+              "properties": {
+                "error": {
+                  "$ref": "#/definitions/runtimeStreamError"
+                },
+                "result": {
+                  "$ref": "#/definitions/etcdserverpbLeaseKeepAliveResponse"
+                }
+              }
             }
           }
         }
@@ -1009,7 +1068,16 @@
           "200": {
             "description": "A successful response.(streaming responses)",
             "schema": {
-              "$ref": "#/definitions/etcdserverpbSnapshotResponse"
+              "type": "object",
+              "title": "Stream result of etcdserverpbSnapshotResponse",
+              "properties": {
+                "error": {
+                  "$ref": "#/definitions/runtimeStreamError"
+                },
+                "result": {
+                  "$ref": "#/definitions/etcdserverpbSnapshotResponse"
+                }
+              }
             }
           }
         }
@@ -1091,7 +1159,16 @@
           "200": {
             "description": "A successful response.(streaming responses)",
             "schema": {
-              "$ref": "#/definitions/etcdserverpbWatchResponse"
+              "type": "object",
+              "title": "Stream result of etcdserverpbWatchResponse",
+              "properties": {
+                "error": {
+                  "$ref": "#/definitions/runtimeStreamError"
+                },
+                "result": {
+                  "$ref": "#/definitions/etcdserverpbWatchResponse"
+                }
+              }
             }
           }
         }
@@ -1191,6 +1268,15 @@
         "WRITE",
         "READWRITE"
       ]
+    },
+    "authpbUserAddOptions": {
+      "type": "object",
+      "properties": {
+        "no_password": {
+          "type": "boolean",
+          "format": "boolean"
+        }
+      }
     },
     "etcdserverpbAlarmMember": {
       "type": "object",
@@ -1387,11 +1473,29 @@
         }
       }
     },
+    "etcdserverpbAuthStatusRequest": {
+      "type": "object"
+    },
+    "etcdserverpbAuthStatusResponse": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "format": "boolean"
+        },
+        "header": {
+          "$ref": "#/definitions/etcdserverpbResponseHeader"
+        }
+      }
+    },
     "etcdserverpbAuthUserAddRequest": {
       "type": "object",
       "properties": {
         "name": {
           "type": "string"
+        },
+        "options": {
+          "$ref": "#/definitions/authpbUserAddOptions"
         },
         "password": {
           "type": "string"
@@ -1882,6 +1986,11 @@
             "type": "string"
           }
         },
+        "isLearner": {
+          "description": "isLearner indicates if the member is raft learner.",
+          "type": "boolean",
+          "format": "boolean"
+        },
         "name": {
           "description": "name is the human-readable name of the member. If the member is not started, the name will be an empty string.",
           "type": "string"
@@ -1898,6 +2007,11 @@
     "etcdserverpbMemberAddRequest": {
       "type": "object",
       "properties": {
+        "isLearner": {
+          "description": "isLearner indicates if the added member is raft learner.",
+          "type": "boolean",
+          "format": "boolean"
+        },
         "peerURLs": {
           "description": "peerURLs is the list of URLs the added member will use to communicate with the cluster.",
           "type": "array",
@@ -1937,6 +2051,31 @@
         },
         "members": {
           "description": "members is a list of all members associated with the cluster.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/etcdserverpbMember"
+          }
+        }
+      }
+    },
+    "etcdserverpbMemberPromoteRequest": {
+      "type": "object",
+      "properties": {
+        "ID": {
+          "description": "ID is the member ID of the member to promote.",
+          "type": "string",
+          "format": "uint64"
+        }
+      }
+    },
+    "etcdserverpbMemberPromoteResponse": {
+      "type": "object",
+      "properties": {
+        "header": {
+          "$ref": "#/definitions/etcdserverpbResponseHeader"
+        },
+        "members": {
+          "description": "members is a list of all members after promoting the member.",
           "type": "array",
           "items": {
             "$ref": "#/definitions/etcdserverpbMember"
@@ -2266,6 +2405,11 @@
         "header": {
           "$ref": "#/definitions/etcdserverpbResponseHeader"
         },
+        "isLearner": {
+          "description": "isLearner indicates if the member is raft learner.",
+          "type": "boolean",
+          "format": "boolean"
+        },
         "leader": {
           "description": "leader is the member ID which the responding member believes is the current leader.",
           "type": "string",
@@ -2506,6 +2650,43 @@
           "description": "version is the version of the key. A deletion resets\nthe version to zero and any modification of the key\nincreases its version.",
           "type": "string",
           "format": "int64"
+        }
+      }
+    },
+    "protobufAny": {
+      "type": "object",
+      "properties": {
+        "type_url": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string",
+          "format": "byte"
+        }
+      }
+    },
+    "runtimeStreamError": {
+      "type": "object",
+      "properties": {
+        "details": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/protobufAny"
+          }
+        },
+        "grpc_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "http_code": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "http_status": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
         }
       }
     }
