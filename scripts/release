@@ -32,19 +32,8 @@ main() {
   MINOR_VERSION=$(echo "${VERSION}" | cut -d. -f 1-2)
   BRANCH="release-${MINOR_VERSION}"
 
-  if ! command -v acbuild >/dev/null; then
-    echo "cannot find acbuild"
-    exit 1
-  fi
-
   if ! command -v docker >/dev/null; then
     echo "cannot find docker"
-    exit 1
-  fi
-
-  KEYID=$(gpg --list-keys --with-colons| awk -F: '/^pub:/ { print $5 }')
-  if [[ -z "${KEYID}" ]]; then
-    echo "Failed to load gpg key. Is gpg set up correctly for etcd releases?"
     exit 1
   fi
 
@@ -56,7 +45,7 @@ main() {
   if [ ! -d "${reldir}/etcd" ]; then
     mkdir -p "${reldir}"
     cd "${reldir}"
-    git clone git@github.com:coreos/etcd.git --branch "${BRANCH}"
+    git clone https://github.com/etcd-io/etcd.git --branch "${BRANCH}"
   fi
   cd "${reldir}/etcd"
 
@@ -68,7 +57,8 @@ main() {
   fi
 
   # Check go version.
-  local go_version="go$(yq -r ".go[0]" .travis.yml)"
+  # download "yq" from https://github.com/mikefarah/yq
+  local go_version="go$(yq read .travis.yml "go[0]")"
   local current_go_version=$(go version | awk '{ print $3 }')
   if [[ "${current_go_version}" != "${go_version}" ]]; then
     echo "Current go version is ${current_go_version}, but etcd ${RELEASE_VERSION} requires ${go_version} (see .travis.yml)."
@@ -87,10 +77,10 @@ main() {
       fi
       echo "Updating version from ${source_version} to ${VERSION} in version/version.go"
       sed -i "s/${source_version}/${VERSION}/g" version/version.go
-      echo "Building etcd with updated version"
-      ./build
     fi
 
+    echo "Building etcd and checking --version output"
+    ./build
     local etcd_version=$(bin/etcd --version | grep "etcd Version" | awk '{ print $3 }')
     if [[ "${etcd_version}" != "${VERSION}" ]]; then
       echo "Wrong etcd version in version/version.go. Expected ${etcd_version} but got ${VERSION}. Aborting."
@@ -106,7 +96,7 @@ main() {
 
     # Push the version change if it's not already been pushed.
     if [ $(git rev-list --count "origin/${BRANCH}..${BRANCH}") -gt 0 ]; then
-      read -p "Push version bump up to ${VERSION} to github.com/coreos/etcd [y/N]? " confirm
+      read -p "Push version bump up to ${VERSION} to github.com/etcd-io/etcd [y/N]? " confirm
       [[ "${confirm,,}" == "y" ]] || exit 1
       git push
     fi
@@ -116,7 +106,26 @@ main() {
       echo "Skipping tag step. git tag ${RELEASE_VERSION} already exists."
     else
       echo "Tagging release..."
+      KEYID=$(gpg --list-keys --with-colons| awk -F: '/^pub:/ { print $5 }')
+      if [[ -z "${KEYID}" ]]; then
+        echo "Failed to load gpg key. Is gpg set up correctly for etcd releases?"
+        exit 1
+      fi
       git tag --local-user "${KEYID}" --sign "${RELEASE_VERSION}" --message "${RELEASE_VERSION}"
+    fi
+
+    # Verify the latest commit has the version tag
+    local tag="$(git describe --exact-match HEAD)"
+    if [ "${tag}" != "${RELEASE_VERSION}" ]; then
+      echo "Error: Expected HEAD to be tagged with ${RELEASE_VERSION}, but 'git describe --exact-match HEAD' reported: ${tag}"
+      exit 1
+    fi
+
+    # Verify the version tag is on the right branch
+    local branch=$(git branch --contains "${RELEASE_VERSION}")
+    if [ "${branch}" != "release-${MINOR_VERSION}" ]; then
+      echo "Error: Git tag ${RELEASE_VERSION} should be on branch release-${MINOR_VERSION} but is on ${branch}"
+      exit 1
     fi
 
     # Push the tag change if it's not already been pushed.
@@ -141,8 +150,8 @@ main() {
   fi
 
   # Sanity checks.
-  ./release/etcd-${RELEASE_VERSION}-linux-amd64/etcd --version | grep -q "etcd Version: ${VERSION}"
-  ETCDCTL_API=3 ./release/etcd-${RELEASE_VERSION}-linux-amd64/etcdctl version | grep -q "etcdctl version: ${VERSION}"
+  ./release/etcd-${RELEASE_VERSION}-$(go env GOOS)-amd64/etcd --version | grep -q "etcd Version: ${VERSION}" || true
+  ./release/etcd-${RELEASE_VERSION}-$(go env GOOS)-amd64/etcdctl version | grep -q "etcdctl version: ${VERSION}" || true
 
   # Upload artifacts.
   if [ "${NO_UPLOAD}" == 1 ]; then
@@ -152,14 +161,13 @@ main() {
     [[ "${confirm,,}" == "y" ]] || exit 1
     gsutil -m cp ./release/*.zip gs://etcd/${RELEASE_VERSION}/
     gsutil -m cp ./release/*.tar.gz gs://etcd/${RELEASE_VERSION}/
-    gsutil -m cp ./release/*.aci gs://etcd/${RELEASE_VERSION}/
     gsutil -m acl ch -u allUsers:R -r gs://etcd/${RELEASE_VERSION}/
   fi
-  
+
     # Push images.
   if [ "${NO_DOCKER_PUSH}" == 1 ]; then
     echo "Skipping docker push. --no-docker-push flat is set."
-  else    
+  else
     read -p "Publish etcd ${RELEASE_VERSION} docker images to quay.io [y/N]? " confirm
     [[ "${confirm,,}" == "y" ]] || exit 1
     for i in {1..5}; do
@@ -168,45 +176,46 @@ main() {
     done
     gcloud docker -- login -u _json_key -p "$(cat /etc/gcp-key-etcd-development.json)" https://gcr.io
 
+    echo "Pushing container images to quay.io" ${RELEASE_VERSION}
     docker push quay.io/coreos/etcd:${RELEASE_VERSION}
+
+    echo "Pushing container images to gcr.io" ${RELEASE_VERSION}
     gcloud docker -- push gcr.io/etcd-development/etcd:${RELEASE_VERSION}
-    if [ "${MINOR_VERSION}" != "3.1" ]; then
-      for TARGET_ARCH in "-arm64" "-ppc64le"; do
-        docker push quay.io/coreos/etcd:${RELEASE_VERSION}${TARGET_ARCH}
-        gcloud docker -- push gcr.io/etcd-development/etcd:${RELEASE_VERSION}${TARGET_ARCH}
-      done
-    fi
+
+    for TARGET_ARCH in "-arm64" "-ppc64le"; do
+      echo "Pushing container images to quay.io" ${RELEASE_VERSION}${TARGET_ARCH}
+      docker push quay.io/coreos/etcd:${RELEASE_VERSION}${TARGET_ARCH}
+
+      echo "Pushing container images to gcr.io" ${RELEASE_VERSION}${TARGET_ARCH}
+      gcloud docker -- push gcr.io/etcd-development/etcd:${RELEASE_VERSION}${TARGET_ARCH}
+    done
+
+    echo "Setting permissions using gsutil..."
     gsutil -m acl ch -u allUsers:R -r gs://artifacts.etcd-development.appspot.com
-
-    docker tag quay.io/coreos/etcd:${RELEASE_VERSION} quay.io/coreos/etcd:v${MINOR_VERSION}
-    docker push quay.io/coreos/etcd:v${MINOR_VERSION}
-    
-    gcloud docker -- tag gcr.io/etcd-development/etcd:${RELEASE_VERSION} gcr.io/etcd-development/etcd:v${MINOR_VERSION}
-    gcloud docker -- push gcr.io/etcd-development/etcd:v${MINOR_VERSION}
   fi
 
-  # TODO: test
-  # docker run --rm --name etcd-gcr-${RELEASE_VERSION} gcr.io/etcd-development/etcd:${RELEASE_VERSION};
-  # docker exec etcd-gcr-${RELEASE_VERSION} /bin/sh -c "/usr/local/bin/etcd --version"
-  # docker exec etcd-gcr-${RELEASE_VERSION} /bin/sh -c "ETCDCTL_API=3 /usr/local/bin/etcdctl version"
-  # docker exec etcd-gcr-${RELEASE_VERSION} /bin/sh -c "ETCDCTL_API=3 /usr/local/bin/etcdctl put foo bar"
-  # docker exec etcd-gcr-${RELEASE_VERSION} /bin/sh -c "ETCDCTL_API=3 /usr/local/bin/etcdctl get foo"
+  ### Release validation
+  mkdir -p downloads
 
-  # Bump version to next development version.
-  git checkout -q "${BRANCH}" # Since we might be on a checkout of the remote version tag.
-  local source_version=$(egrep "\s+Version\s*=" version/version.go | sed -e "s/.*\"\(.*\)\".*/\1/g")
-  if [[ "${source_version}" != "${VERSION}+git" ]]; then
-    echo "Updating version from ${source_version} to ${VERSION}+git in version/version.go"
-    sed -i "s/${source_version}/${VERSION}+git/g" version/version.go
-    echo "Building etcd with ${VERSION}+git in version/version.go"
-    git add version/version.go
-    git commit -m "version: bump up to ${VERSION}+git"
-    git diff --staged
-    read -p "Push version bump up to ${VERSION}+git to github.com/coreos/etcd [y/N]? " confirm
-    [[ "${confirm,,}" == "y" ]] || exit 1
-    git push
+  # Check image versions
+  for IMAGE in "quay.io/coreos/etcd:${RELEASE_VERSION}" "gcr.io/etcd-development/etcd:${RELEASE_VERSION}"; do
+    local image_version=$(docker run --rm "${IMAGE}" etcd --version | grep "etcd Version" | awk -F: '{print $2}' | tr -d '[:space:]')
+    if [ "${image_version}" != "${VERSION}" ]; then
+      echo "Check failed: etcd --version output for ${IMAGE} is incorrect: ${image_version}"
+      exit 1
+    fi
+  done
+
+  # Check gsutil binary versions
+  local BINARY_TGZ="etcd-${RELEASE_VERSION}-$(go env GOOS)-amd64.tar.gz"
+  gsutil cp "gs://etcd/${RELEASE_VERSION}/${BINARY_TGZ}" downloads
+  tar -zx -C downloads -f "downloads/${BINARY_TGZ}"
+  local binary_version=$("./downloads/etcd-${RELEASE_VERSION}-$(go env GOOS)-amd64/etcd" --version | grep "etcd Version" | awk -F: '{print $2}' | tr -d '[:space:]')
+  if [ "${binary_version}" != "${VERSION}" ]; then
+    echo "Check failed: etcd --version output for ${BINARY_TGZ} from gs://etcd/${RELEASE_VERSION} is incorrect: ${binary_version}"
+    exit 1
   fi
-  
+
   # TODO: signing process
   echo ""
   echo "WARNING: The release has not been signed and published to github. This must be done manually."

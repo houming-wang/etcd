@@ -513,39 +513,30 @@ func (s *EtcdServer) raftRequestOnce(ctx context.Context, r pb.InternalRaftReque
 }
 
 func (s *EtcdServer) raftRequest(ctx context.Context, r pb.InternalRaftRequest) (proto.Message, error) {
-	for {
-		resp, err := s.raftRequestOnce(ctx, r)
-		if err != auth.ErrAuthOldRevision {
-			return resp, err
-		}
-	}
+	return s.raftRequestOnce(ctx, r)
 }
 
 // doSerialize handles the auth logic, with permissions checked by "chk", for a serialized request "get". Returns a non-nil error on authentication failure.
 func (s *EtcdServer) doSerialize(ctx context.Context, chk func(*auth.AuthInfo) error, get func()) error {
-	for {
-		ai, err := s.AuthInfoFromCtx(ctx)
-		if err != nil {
-			return err
-		}
-		if ai == nil {
-			// chk expects non-nil AuthInfo; use empty credentials
-			ai = &auth.AuthInfo{}
-		}
-		if err = chk(ai); err != nil {
-			if err == auth.ErrAuthOldRevision {
-				continue
-			}
-			return err
-		}
-		// fetch response for serialized request
-		get()
-		//  empty credentials or current auth info means no need to retry
-		if ai.Revision == 0 || ai.Revision == s.authStore.Revision() {
-			return nil
-		}
-		// avoid TOCTOU error, retry of the request is required.
+	ai, err := s.AuthInfoFromCtx(ctx)
+	if err != nil {
+		return err
 	}
+	if ai == nil {
+		// chk expects non-nil AuthInfo; use empty credentials
+		ai = &auth.AuthInfo{}
+	}
+	if err = chk(ai); err != nil {
+		return err
+	}
+	// fetch response for serialized request
+	get()
+	// check for stale token revision in case the auth store was updated while
+	// the request has been handled.
+	if ai.Revision != 0 && ai.Revision != s.authStore.Revision() {
+		return auth.ErrAuthOldRevision
+	}
+	return nil
 }
 
 func (s *EtcdServer) processInternalRaftRequestOnce(ctx context.Context, r pb.InternalRaftRequest) (*applyResult, error) {
@@ -614,7 +605,10 @@ func (s *EtcdServer) linearizableReadLoop() {
 		id1 := s.reqIDGen.Next()
 		binary.BigEndian.PutUint64(ctxToSend, id1)
 
+		leaderChangedNotifier := s.leaderChangedNotify()
 		select {
+		case <-leaderChangedNotifier:
+			continue
 		case <-s.readwaitc:
 		case <-s.stopping:
 			return
@@ -658,6 +652,12 @@ func (s *EtcdServer) linearizableReadLoop() {
 					plog.Warningf("ignored out-of-date read index response; local node read indexes queueing up and waiting to be in sync with leader (request ID want %d, got %d)", id1, id2)
 					slowReadIndex.Inc()
 				}
+
+			case <-leaderChangedNotifier:
+				timeout = true
+				readIndexFailed.Inc()
+				// return a retryable error.
+				nr.notify(ErrLeaderChanged)
 
 			case <-time.After(s.Cfg.ReqTimeout()):
 				plog.Warningf("timed out waiting for read index response (local node might have slow network)")

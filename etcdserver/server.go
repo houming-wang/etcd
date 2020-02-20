@@ -198,7 +198,9 @@ type EtcdServer struct {
 	// stopping is closed by run goroutine on shutdown.
 	stopping chan struct{}
 	// done is closed when all goroutines from start() complete.
-	done chan struct{}
+	done            chan struct{}
+	leaderChanged   chan struct{}
+	leaderChangedMu sync.RWMutex
 
 	errorc     chan error
 	id         types.ID
@@ -597,8 +599,10 @@ func (s *EtcdServer) start() {
 	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.readwaitc = make(chan struct{}, 1)
 	s.readNotifier = newNotifier()
+	s.leaderChanged = make(chan struct{})
 	if s.ClusterVersion() != nil {
 		plog.Infof("starting server... [version: %v, cluster version: %v]", version.Version, version.Cluster(s.ClusterVersion().String()))
+		membership.ClusterVersionMetrics.With(prometheus.Labels{"cluster_version": version.Cluster(s.ClusterVersion().String())}).Set(1)
 	} else {
 		plog.Infof("starting server... [version: %v, cluster version: to_be_decided]", version.Version)
 	}
@@ -609,12 +613,13 @@ func (s *EtcdServer) start() {
 
 func (s *EtcdServer) purgeFile() {
 	var dberrc, serrc, werrc <-chan error
+	var dbdonec, sdonec, wdonec <-chan struct{}
 	if s.Cfg.MaxSnapFiles > 0 {
-		dberrc = fileutil.PurgeFile(s.Cfg.SnapDir(), "snap.db", s.Cfg.MaxSnapFiles, purgeFileInterval, s.done)
-		serrc = fileutil.PurgeFile(s.Cfg.SnapDir(), "snap", s.Cfg.MaxSnapFiles, purgeFileInterval, s.done)
+		dbdonec, dberrc = fileutil.PurgeFileWithDoneNotify(s.Cfg.SnapDir(), "snap.db", s.Cfg.MaxSnapFiles, purgeFileInterval, s.stopping)
+		sdonec, serrc = fileutil.PurgeFileWithDoneNotify(s.Cfg.SnapDir(), "snap", s.Cfg.MaxSnapFiles, purgeFileInterval, s.stopping)
 	}
 	if s.Cfg.MaxWALFiles > 0 {
-		werrc = fileutil.PurgeFile(s.Cfg.WALDir(), "wal", s.Cfg.MaxWALFiles, purgeFileInterval, s.done)
+		wdonec, werrc = fileutil.PurgeFileWithDoneNotify(s.Cfg.WALDir(), "wal", s.Cfg.MaxWALFiles, purgeFileInterval, s.stopping)
 	}
 	select {
 	case e := <-dberrc:
@@ -624,6 +629,15 @@ func (s *EtcdServer) purgeFile() {
 	case e := <-werrc:
 		plog.Fatalf("failed to purge wal file %v", e)
 	case <-s.stopping:
+		if dbdonec != nil {
+			<-dbdonec
+		}
+		if sdonec != nil {
+			<-sdonec
+		}
+		if wdonec != nil {
+			<-wdonec
+		}
 		return
 	}
 }
@@ -733,6 +747,17 @@ func (s *EtcdServer) run() {
 					s.compactor.Resume()
 				}
 			}
+			if newLeader {
+				select {
+				case s.leaderChanged <- struct{}{}:
+				default:
+				}
+				s.leaderChangedMu.Lock()
+				lc := s.leaderChanged
+				s.leaderChanged = make(chan struct{})
+				s.leaderChangedMu.Unlock()
+				close(lc)
+			}
 
 			// TODO: remove the nil checking
 			// current test utility does not provide the stats
@@ -841,6 +866,12 @@ func (s *EtcdServer) run() {
 	}
 }
 
+func (s *EtcdServer) leaderChangedNotify() <-chan struct{} {
+	s.leaderChangedMu.RLock()
+	defer s.leaderChangedMu.RUnlock()
+	return s.leaderChanged
+}
+
 func (s *EtcdServer) applyAll(ep *etcdProgress, apply *apply) {
 	s.applySnapshot(ep, apply)
 	s.applyEntries(ep, apply)
@@ -866,9 +897,12 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, apply *apply) {
 	if raft.IsEmptySnap(apply.snapshot) {
 		return
 	}
-
+	applySnapshotInProgress.Inc()
 	plog.Infof("applying snapshot at index %d...", ep.snapi)
-	defer plog.Infof("finished applying incoming snapshot at index %d", ep.snapi)
+	defer func() {
+		plog.Infof("finished applying incoming snapshot at index %d", ep.snapi)
+		applySnapshotInProgress.Dec()
+	}()
 
 	if apply.snapshot.Metadata.Index <= ep.appliedi {
 		plog.Panicf("snapshot index [%d] should > appliedi[%d] + 1",
