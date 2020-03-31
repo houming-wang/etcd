@@ -1143,7 +1143,7 @@ func (m *member) Terminate(t testing.TB) {
 }
 
 // Metric gets the metric value for a member
-func (m *member) Metric(metricName string, expectLabels ...string) (string, error) {
+func (m *member) Metric(metricName string) (string, error) {
 	cfgtls := transport.TLSInfo{}
 	tr, err := transport.NewTimeoutTransport(cfgtls, time.Second, time.Second, time.Second)
 	if err != nil {
@@ -1161,20 +1161,9 @@ func (m *member) Metric(metricName string, expectLabels ...string) (string, erro
 	}
 	lines := strings.Split(string(b), "\n")
 	for _, l := range lines {
-		if !strings.HasPrefix(l, metricName) {
-			continue
+		if strings.HasPrefix(l, metricName) {
+			return strings.Split(l, " ")[1], nil
 		}
-		ok := true
-		for _, lv := range expectLabels {
-			if !strings.Contains(l, lv) {
-				ok = false
-				break
-			}
-		}
-		if !ok {
-			continue
-		}
-		return strings.Split(l, " ")[1], nil
 	}
 	return "", nil
 }

@@ -17,10 +17,8 @@ package integration
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -30,7 +28,6 @@ import (
 	"go.etcd.io/etcd/integration"
 	"go.etcd.io/etcd/mvcc/mvccpb"
 	"go.etcd.io/etcd/pkg/testutil"
-	"go.etcd.io/etcd/version"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -209,22 +206,6 @@ func TestKVPutWithRequireLeader(t *testing.T) {
 	_, err := kv.Put(clientv3.WithRequireLeader(context.Background()), "foo", "bar")
 	if err != rpctypes.ErrNoLeader {
 		t.Fatal(err)
-	}
-
-	cnt, err := clus.Members[0].Metric(
-		"etcd_server_client_requests_total",
-		`type="unary"`,
-		fmt.Sprintf(`client_api_version="%v"`, version.APIVersion),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cv, err := strconv.ParseInt(cnt, 10, 32)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cv < 1 { // >1 when retried
-		t.Fatalf("expected at least 1, got %q", cnt)
 	}
 
 	// clients may give timeout errors since the members are stopped; take

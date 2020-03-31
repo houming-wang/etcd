@@ -75,7 +75,6 @@ This is a generated documentation. Please read the proto files for more.
 | HashKV | HashKVRequest | HashKVResponse | HashKV computes the hash of all MVCC keys up to a given revision. It only iterates "key" bucket in backend storage. |
 | Snapshot | SnapshotRequest | SnapshotResponse | Snapshot sends a snapshot of the entire backend from a member over a stream to a client. |
 | MoveLeader | MoveLeaderRequest | MoveLeaderResponse | MoveLeader requests current leader node to transfer its leadership to transferee. |
-| Downgrade | DowngradeRequest | DowngradeResponse | Downgrade requests downgrade, cancel downgrade on the cluster version. |
 
 
 
@@ -254,7 +253,6 @@ Empty field.
 | ----- | ----------- | ---- |
 | header |  | ResponseHeader |
 | enabled |  | bool |
-| authRevision | authRevision is the current revision of auth store | uint64 |
 
 
 
@@ -463,24 +461,6 @@ Empty field.
 
 
 
-##### message `DowngradeRequest` (etcdserver/etcdserverpb/rpc.proto)
-
-| Field | Description | Type |
-| ----- | ----------- | ---- |
-| action | action is the kind of downgrade request to issue. The action may VALIDATE the target version, DOWNGRADE the cluster version, or CANCEL the current downgrading job. | DowngradeAction |
-| version | version is the target version to downgrade. | string |
-
-
-
-##### message `DowngradeResponse` (etcdserver/etcdserverpb/rpc.proto)
-
-| Field | Description | Type |
-| ----- | ----------- | ---- |
-| header |  | ResponseHeader |
-| version | version is the current cluster version. | string |
-
-
-
 ##### message `HashKVRequest` (etcdserver/etcdserverpb/rpc.proto)
 
 | Field | Description | Type |
@@ -670,9 +650,7 @@ Empty field.
 
 ##### message `MemberListRequest` (etcdserver/etcdserverpb/rpc.proto)
 
-| Field | Description | Type |
-| ----- | ----------- | ---- |
-| linearizable |  | bool |
+Empty field.
 
 
 

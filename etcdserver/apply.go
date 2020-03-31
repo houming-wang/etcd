@@ -132,9 +132,6 @@ func (a *applierV3backend) Apply(r *pb.InternalRaftRequest) *applyResult {
 	ar := &applyResult{}
 	defer func(start time.Time) {
 		warnOfExpensiveRequest(a.s.getLogger(), start, &pb.InternalRaftStringer{Request: r}, ar.resp, ar.err)
-		if ar.err != nil {
-			warnOfFailedRequest(a.s.getLogger(), start, &pb.InternalRaftStringer{Request: r}, ar.resp, ar.err)
-		}
 	}(time.Now())
 
 	// call into a.s.applyV3.F instead of a.F so upper appliers can check individual calls
@@ -719,8 +716,7 @@ func (a *applierV3backend) AuthDisable() (*pb.AuthDisableResponse, error) {
 
 func (a *applierV3backend) AuthStatus() (*pb.AuthStatusResponse, error) {
 	enabled := a.s.AuthStore().IsAuthEnabled()
-	authRevision := a.s.AuthStore().Revision()
-	return &pb.AuthStatusResponse{Header: newHeader(a.s), Enabled: enabled, AuthRevision: authRevision}, nil
+	return &pb.AuthStatusResponse{Header: newHeader(a.s), Enabled: enabled}, nil
 }
 
 func (a *applierV3backend) Authenticate(r *pb.InternalAuthenticateRequest) (*pb.AuthenticateResponse, error) {

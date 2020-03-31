@@ -758,10 +758,6 @@ func (s *EtcdServer) linearizableReadLoop() {
 	}
 }
 
-func (s *EtcdServer) LinearizableReadNotify(ctx context.Context) error {
-	return s.linearizableReadNotify(ctx)
-}
-
 func (s *EtcdServer) linearizableReadNotify(ctx context.Context) error {
 	s.readMu.RLock()
 	nc := s.readNotifier
@@ -794,8 +790,5 @@ func (s *EtcdServer) AuthInfoFromCtx(ctx context.Context) (*auth.AuthInfo, error
 	}
 	authInfo = s.AuthStore().AuthInfoFromTLS(ctx)
 	return authInfo, nil
-}
 
-func (s *EtcdServer) Downgrade(ctx context.Context, r *pb.DowngradeRequest) (*pb.DowngradeResponse, error) {
-	return nil, nil
 }

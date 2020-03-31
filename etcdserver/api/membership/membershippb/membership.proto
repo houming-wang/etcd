@@ -36,8 +36,3 @@ message ClusterMemberAttrSetRequest {
   uint64 member_ID = 1;
   Attributes member_attributes = 2;
 }
-
-message DowngradeInfoSetRequest {
-  bool enabled = 1;
-  string ver = 2;
-}

@@ -41,7 +41,6 @@ import (
 	"go.etcd.io/etcd/etcdserver/api/v2store"
 	"go.etcd.io/etcd/etcdserver/api/v3alarm"
 	"go.etcd.io/etcd/etcdserver/api/v3compactor"
-	"go.etcd.io/etcd/etcdserver/cindex"
 	pb "go.etcd.io/etcd/etcdserver/etcdserverpb"
 	"go.etcd.io/etcd/lease"
 	"go.etcd.io/etcd/lease/leasehttp"
@@ -192,8 +191,10 @@ type EtcdServer struct {
 	term              uint64 // must use atomic operations to access; keep 64-bit aligned.
 	lead              uint64 // must use atomic operations to access; keep 64-bit aligned.
 
-	consistIndex cindex.ConsistentIndexer // consistIndex is used to get/set/save consistentIndex
-	r            raftNode                 // uses 64-bit atomics; keep 64-bit aligned.
+	// consistIndex used to hold the offset of current executing entry
+	// It is initialized to 0 before executing any entry.
+	consistIndex consistentIndex // must use atomic operations to access; keep 64-bit aligned.
+	r            raftNode        // uses 64-bit atomics; keep 64-bit aligned.
 
 	readych chan struct{}
 	Cfg     ServerConfig
@@ -264,7 +265,7 @@ type EtcdServer struct {
 
 	// wgMu blocks concurrent waitgroup mutation while server stopping
 	wgMu sync.RWMutex
-	// wg is used to wait for the goroutines that depends on the server state
+	// wg is used to wait for the go routines that depends on the server state
 	// to exit when stopping the server.
 	wg sync.WaitGroup
 
@@ -495,7 +496,6 @@ func NewServer(cfg ServerConfig) (srv *EtcdServer, err error) {
 		reqIDGen:         idutil.NewGenerator(uint16(id), time.Now()),
 		forceVersionC:    make(chan struct{}),
 		AccessController: &AccessController{CORS: cfg.CORS, HostWhitelist: cfg.HostWhitelist},
-		consistIndex:     cindex.NewConsistentIndex(be.BatchTx()),
 	}
 	serverID.With(prometheus.Labels{"server_id": id.String()}).Set(1)
 
@@ -514,21 +514,9 @@ func NewServer(cfg ServerConfig) (srv *EtcdServer, err error) {
 			CheckpointInterval:         cfg.LeaseCheckpointInterval,
 			ExpiredLeasesRetryInterval: srv.Cfg.ReqTimeout(),
 		})
-
-	tp, err := auth.NewTokenProvider(cfg.Logger, cfg.AuthToken,
-		func(index uint64) <-chan struct{} {
-			return srv.applyWait.Wait(index)
-		},
-	)
-	if err != nil {
-		cfg.Logger.Warn("failed to create token provider", zap.Error(err))
-		return nil, err
-	}
-	srv.kv = mvcc.New(srv.getLogger(), srv.be, srv.lessor, srv.consistIndex, mvcc.StoreConfig{CompactionBatchLimit: cfg.CompactionBatchLimit})
-	kvindex := srv.consistIndex.ConsistentIndex()
-	srv.lg.Debug("restore consistentIndex",
-		zap.Uint64("index", kvindex))
+	srv.kv = mvcc.New(srv.getLogger(), srv.be, srv.lessor, &srv.consistIndex, mvcc.StoreConfig{CompactionBatchLimit: cfg.CompactionBatchLimit})
 	if beExist {
+		kvindex := srv.kv.ConsistentIndex()
 		// TODO: remove kvindex != 0 checking when we do not expect users to upgrade
 		// etcd from pre-3.0 release.
 		if snapshot != nil && kvindex < snapshot.Metadata.Index {
@@ -541,9 +529,6 @@ func NewServer(cfg ServerConfig) (srv *EtcdServer, err error) {
 			)
 		}
 	}
-
-	srv.authStore = auth.NewAuthStore(srv.getLogger(), srv.be, srv.consistIndex, tp, int(cfg.BcryptCost))
-
 	newSrv := srv // since srv == nil in defer if srv is returned as nil
 	defer func() {
 		// closing backend without first closing kv can cause
@@ -552,6 +537,18 @@ func NewServer(cfg ServerConfig) (srv *EtcdServer, err error) {
 			newSrv.kv.Close()
 		}
 	}()
+
+	srv.consistIndex.setConsistentIndex(srv.kv.ConsistentIndex())
+	tp, err := auth.NewTokenProvider(cfg.Logger, cfg.AuthToken,
+		func(index uint64) <-chan struct{} {
+			return srv.applyWait.Wait(index)
+		},
+	)
+	if err != nil {
+		cfg.Logger.Warn("failed to create token provider", zap.Error(err))
+		return nil, err
+	}
+	srv.authStore = auth.NewAuthStore(srv.getLogger(), srv.be, tp, int(cfg.BcryptCost))
 	if num := cfg.AutoCompactionRetention; num != 0 {
 		srv.compactor, err = v3compactor.New(cfg.Logger, cfg.AutoCompactionMode, num, srv.kv, srv)
 		if err != nil {
@@ -1095,7 +1092,7 @@ func (s *EtcdServer) applySnapshot(ep *etcdProgress, apply *apply) {
 		lg.Panic("failed to restore mvcc store", zap.Error(err))
 	}
 
-	s.consistIndex.SetConsistentIndex(s.kv.ConsistentIndex())
+	s.consistIndex.setConsistentIndex(s.kv.ConsistentIndex())
 	lg.Info("restored mvcc store")
 
 	// Closing old backend might block until all the txns
@@ -1938,7 +1935,7 @@ func (s *EtcdServer) apply(
 		case raftpb.EntryConfChange:
 			// set the consistent index of current executing entry
 			if e.Index > s.consistIndex.ConsistentIndex() {
-				s.consistIndex.SetConsistentIndex(e.Index)
+				s.consistIndex.setConsistentIndex(e.Index)
 			}
 			var cc raftpb.ConfChange
 			pbutil.MustUnmarshal(&cc, e.Data)
@@ -1963,16 +1960,11 @@ func (s *EtcdServer) apply(
 // applyEntryNormal apples an EntryNormal type raftpb request to the EtcdServer
 func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry) {
 	shouldApplyV3 := false
-	index := s.consistIndex.ConsistentIndex()
-	if e.Index > index {
+	if e.Index > s.consistIndex.ConsistentIndex() {
 		// set the consistent index of current executing entry
-		s.consistIndex.SetConsistentIndex(e.Index)
+		s.consistIndex.setConsistentIndex(e.Index)
 		shouldApplyV3 = true
 	}
-	s.lg.Debug("apply entry normal",
-		zap.Uint64("consistent-index", index),
-		zap.Uint64("entry-index", e.Index),
-		zap.Bool("should-applyV3", shouldApplyV3))
 
 	// raft state machine may generate noop entry when leader confirmation.
 	// skip it in advance to avoid some potential bug in the future
@@ -2002,6 +1994,7 @@ func (s *EtcdServer) applyEntryNormal(e *raftpb.Entry) {
 		s.w.Trigger(req.ID, s.applyV2Request(req))
 		return
 	}
+
 	// do not re-apply applied entries.
 	if !shouldApplyV3 {
 		return

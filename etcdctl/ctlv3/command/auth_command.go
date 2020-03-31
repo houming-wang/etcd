@@ -56,7 +56,7 @@ func authStatusCommandFunc(cmd *cobra.Command, args []string) {
 		ExitWithError(ExitError, err)
 	}
 
-	display.AuthStatus(*result)
+	fmt.Println("Authentication Status:", result.Enabled)
 }
 
 func newAuthEnableCommand() *cobra.Command {

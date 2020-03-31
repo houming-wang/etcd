@@ -86,7 +86,7 @@ func (env *InteractionEnv) DeliverMsgs(rs ...Recipient) int {
 			}
 			toIdx := int(msg.To - 1)
 			if err := env.Nodes[toIdx].Step(msg); err != nil {
-				fmt.Fprintln(env.Output, err)
+				env.Output.WriteString(err.Error())
 			}
 		}
 	}

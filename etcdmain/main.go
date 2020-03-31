@@ -47,14 +47,10 @@ func Main() {
 }
 
 func notifySystemd(lg *zap.Logger) {
-	if lg == nil {
-		lg = zap.NewExample()
-	}
-	lg.Info("notifying init daemon")
 	_, err := daemon.SdNotify(false, daemon.SdNotifyReady)
 	if err != nil {
-		lg.Error("failed to notify systemd for readiness", zap.Error(err))
-		return
+		if lg != nil {
+			lg.Error("failed to notify systemd for readiness", zap.Error(err))
+		}
 	}
-	lg.Info("successfully notified init daemon")
 }
